@@ -34,6 +34,18 @@ function initGrist() {
   let allRecords = [];
   let sessionID = "";
 
+  // Helper to safely restore selection once BOTH records and sessionID are available
+  function restoreSelection() {
+    if (sessionID && sessionID.length > 0 && allRecords.length > 0) {
+      const selection = sessionStorage.getItem(sessionID + "_Dropdown_Item");
+      if (selection) {
+        const dropdown = document.getElementById('dropdown');
+        dropdown.value = selection;
+        dropdown.dispatchEvent(new Event('change'));
+      }
+    }
+  }
+
   grist.ready({
     columns: [{ name: "OptionsToSelect", title: 'Options to select', type: 'Any' }],
     requiredAccess: 'read table',
@@ -51,6 +63,9 @@ function initGrist() {
 
     document.getElementById("container").style.display = '';
     document.getElementById("config").style.display = 'none';
+
+    // Attempt restoration in case onRecords fired first
+    restoreSelection();
   });
 
   grist.onRecords(function (records, mappings) {
@@ -71,18 +86,14 @@ function initGrist() {
     }
     updateDropdown(options);
 
-    //if session ID defined, use it to auto select the dropdown value
-    if (sessionID.length > 0) {
-      const selection = sessionStorage.getItem(sessionID + "_Dropdown_Item");
-      if (selection) {
-        const dropdown = document.getElementById('dropdown');
-        dropdown.value = selection;
-        dropdown.dispatchEvent(new Event('change'));
-      }
-    }    
+    // Attempt restoration in case onOptions fired first
+    restoreSelection();
   });
 
   grist.onRecord(function (record) {
+    // FIX: Guard clause prevents crashing when changing pages or when selection is empty
+    if (!record || !record.id) return;
+
     const mapped = grist.mapColumnNames(record);
     const dropdown = document.getElementById('dropdown');
     const index = allRecords.findIndex(r => r.id === record.id);
