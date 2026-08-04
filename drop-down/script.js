@@ -35,7 +35,7 @@ function initGrist() {
   let sessionID = "";
   let currentMappings = null;
   let isUnloading = false;
-  let hasGristRecord = false; // Flag to check if Grist supplied a record (e.g. via link)
+  let latestRecordId = null; // Tracks the active/linked record ID from Grist
 
   window.addEventListener('beforeunload', () => { isUnloading = true; });
   window.addEventListener('pagehide', () => { isUnloading = true; });
@@ -48,9 +48,26 @@ function initGrist() {
     return `auto_${window.location.pathname}_${mappingHash}_Dropdown_Item`;
   }
 
-  function restoreSelection() {
-    // If unloading, empty, or Grist already set a record from a link, do not restore
-    if (isUnloading || hasGristRecord || allRecords.length === 0) return;
+  // Attempts to sync dropdown to Grist's active/linked record.
+  // Returns true if a match was successfully found and applied.
+  function syncToGristRecord() {
+    if (latestRecordId === null || allRecords.length === 0) return false;
+
+    const index = allRecords.findIndex(r => r.id === latestRecordId);
+    if (index !== -1) {
+      const dropdown = document.getElementById('dropdown');
+      dropdown.value = String(index);
+
+      // Link selection takes precedence AND updates sessionStorage for subsequent page views
+      const storageKey = getStorageKey();
+      sessionStorage.setItem(storageKey, index);
+      return true;
+    }
+    return false;
+  }
+
+  function restoreFromSession() {
+    if (isUnloading || allRecords.length === 0) return;
 
     const storageKey = getStorageKey();
     const selection = sessionStorage.getItem(storageKey);
@@ -58,8 +75,26 @@ function initGrist() {
     if (selection !== null && selection !== undefined) {
       const dropdown = document.getElementById('dropdown');
       if (dropdown.options[selection]) {
-        dropdown.value = selection; // Update UI only; DO NOT call setCursorPos here
+        dropdown.value = selection;
+        
+        const selectedRecord = allRecords[parseInt(selection)];
+        if (selectedRecord) {
+          // Defer cursor update to prevent interrupting Grist's DOM render cycle
+          setTimeout(() => {
+            if (!isUnloading) grist.setCursorPos({ rowId: selectedRecord.id });
+          }, 0);
+        }
       }
+    }
+  }
+
+  function applySelectionLogic() {
+    // 1. Link / Active Grist record takes priority
+    const synced = syncToGristRecord();
+    
+    // 2. Fall back to session storage if Grist did not specify a matching record
+    if (!synced) {
+      restoreFromSession();
     }
   }
 
@@ -82,7 +117,7 @@ function initGrist() {
     document.getElementById("container").style.display = '';
     document.getElementById("config").style.display = 'none';
 
-    setTimeout(restoreSelection, 50);
+    applySelectionLogic();
   });
 
   grist.onRecords(function (records, mappings) {
@@ -106,27 +141,21 @@ function initGrist() {
     }
     updateDropdown(options);
     
-    // Defer session restore to give onRecord time to handle link selections first
-    setTimeout(restoreSelection, 50);
+    // Resolve selection logic once allRecords dataset is fully populated
+    applySelectionLogic();
   });
 
   grist.onRecord(function (record) {
     if (isUnloading || !record || !record.id) return;
 
-    const index = allRecords.findIndex(r => r.id === record.id);
-    if (index !== -1) {
-      hasGristRecord = true; // Mark that link/Grist active cursor was received
-      
-      const dropdown = document.getElementById('dropdown');
-      dropdown.value = String(index);
+    latestRecordId = record.id;
 
-      // Link selection takes precedence AND updates session storage for subsequent pages
-      const storageKey = getStorageKey();
-      sessionStorage.setItem(storageKey, index);
+    // If allRecords is ready, apply immediately; otherwise onRecords will execute it when loaded
+    if (allRecords.length > 0) {
+      syncToGristRecord();
     }
   });
 
-  // Only trigger Grist cursor movement when the user manually changes the select dropdown
   document.getElementById('dropdown').addEventListener('change', function(event) {    
     if (isUnloading) return;
     
@@ -134,7 +163,9 @@ function initGrist() {
     const selectedRecord = allRecords[selectedIndex];
     
     if (selectedRecord) {
+      latestRecordId = selectedRecord.id;
       grist.setCursorPos({ rowId: selectedRecord.id });
+      
       const storageKey = getStorageKey();
       sessionStorage.setItem(storageKey, selectedIndex);
     }
