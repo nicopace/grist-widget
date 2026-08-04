@@ -20,10 +20,10 @@
     // 3. Log the view once Grist widget API is ready
     window.addEventListener('DOMContentLoaded', async () => {
       try {
-        const table = grist.getTable('PageViews');
-        await table.insertRecords([{
+        const pageViews = grist.getTable('PageViews');
+        await pageViews.create({
           fields: { Page: PAGE_NAME }
-        }]);
+        });
         document.getElementById('status').innerText = `Last seen logged for: ${PAGE_NAME}`;
       } catch (err) {
         document.getElementById('status').innerText = "Unable to record view.";
