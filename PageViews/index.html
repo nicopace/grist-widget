@@ -22,8 +22,10 @@
   <div id="logs"></div>
 
   <script>
-    const logContainer = document.getElementById('logs');
+    // Name of the helper ping table created in Step 1
+    const PING_TABLE_NAME = "UserPing"; 
 
+    const logContainer = document.getElementById('logs');
     function log(message, type = 'info') {
       const entry = document.createElement('div');
       entry.className = `log-entry ${type}`;
@@ -49,98 +51,72 @@
       log(`Error during grist.ready(): ${e.message}`, 'error');
     }
 
-    // Helper: Obtain the logged-in user's email via Grist Access Token
-    async function getCurrentUserEmail() {
-      try {
-        // Explicitly passing { readOnly: true } prevents grist-plugin-api from throwing
-        const tokenInfo = await grist.docApi.getAccessToken({ readOnly: true });
-        
-        if (tokenInfo && tokenInfo.token) {
-          const parts = tokenInfo.token.split('.');
-          if (parts.length === 3) {
-            // Handle URL-safe base64 decoding for JWT
-            let base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-            while (base64.length % 4) base64 += '=';
-            const payload = JSON.parse(atob(base64));
-            
-            if (payload.user && payload.user.email) return payload.user.email;
-            if (payload.email) return payload.email;
-          }
-        }
-
-        // Secondary attempt via API profile endpoint
-        if (tokenInfo && tokenInfo.baseUrl && tokenInfo.token) {
-          try {
-            const res = await fetch(`${tokenInfo.baseUrl}/profile/user?auth=${tokenInfo.token}`);
-            if (res.ok) {
-              const profile = await res.json();
-              if (profile && profile.email) return profile.email;
-            }
-          } catch (e) {
-            // Fallback fail
-          }
-        }
-      } catch (err) {
-        log(`Failed to retrieve user token: ${err.message || err}`, 'error');
-      }
-      return null;
-    }
-
     grist.onRecords(async (records, mappings) => {
-      log(`onRecords received ${records ? records.length : 0} rows.`);
-
       if (!mappings || !mappings.userEmail || !mappings.lastSeen) {
-        log("Action required: Map both 'User Email Field' and 'Last Seen Field' in the Widget side panel ->", "warn");
+        log("Action required: Map both 'User Email Field' and 'Last Seen Field' in Widget side panel ->", "warn");
         return;
       }
 
-      if (hasUpdated) {
-        log("Timestamp already updated for this session.", "info");
-        return;
-      }
+      if (hasUpdated) return;
 
-      log("Detecting active user email...");
-      const userEmail = await getCurrentUserEmail();
-
-      if (!userEmail) {
-        log("Could not detect active user email. Ensure user is logged in.", "error");
-        return;
-      }
-
-      log(`Active user: ${userEmail}`);
-
-      const emailCol = mappings.userEmail;
-      const lastSeenCol = mappings.lastSeen;
-
-      // Match target user record (case-insensitive)
-      const targetRecord = records.find(r => 
-        r[emailCol] && String(r[emailCol]).trim().toLowerCase() === userEmail.trim().toLowerCase()
-      );
-
-      if (!targetRecord) {
-        log(`No row found where '${emailCol}' matches '${userEmail}'.`, "warn");
-        return;
-      }
-
-      log(`Found user record (Row #${targetRecord.id}). Updating timestamp...`);
+      log("Resolving active user via trigger formula ping...");
 
       try {
-        const table = grist.selectedTable || grist.getTable();
+        const pingTable = grist.getTable(PING_TABLE_NAME);
+        
+        // 1. Create temporary record in UserPing table
+        const createdRes = await pingTable.create({ fields: {} });
+        const createdId = Array.isArray(createdRes) ? createdRes[0].id : (createdRes.id || createdRes);
+        log(`Created temporary ping record #${createdId}.`);
+
+        // 2. Fetch records from UserPing to read server-calculated $user.Email
+        const pingRecords = await pingTable.getRecords();
+        const myPing = pingRecords.find(r => r.id === createdId);
+        const activeEmail = myPing ? myPing.User_Email : null;
+
+        // 3. Delete temporary ping record
+        await pingTable.destroy([createdId]);
+        log(`Cleaned up ping record #${createdId}.`);
+
+        if (!activeEmail) {
+          log(`Could not resolve user email. Check that table '${PING_TABLE_NAME}' has column 'User_Email' with formula $user.Email.`, "error");
+          return;
+        }
+
+        log(`Active user resolved: ${activeEmail}`);
+
+        // 4. Locate user row in target table and update timestamp
+        const emailCol = mappings.userEmail;
+        const lastSeenCol = mappings.lastSeen;
+
+        const targetRecord = records.find(r => 
+          r[emailCol] && String(r[emailCol]).trim().toLowerCase() === activeEmail.trim().toLowerCase()
+        );
+
+        if (!targetRecord) {
+          log(`No row found in main table where '${emailCol}' matches '${activeEmail}'.`, "warn");
+          return;
+        }
+
+        log(`Updating Row #${targetRecord.id}...`);
+
+        const mainTable = grist.selectedTable || grist.getTable();
         const nowInSeconds = Math.floor(Date.now() / 1000);
 
         hasUpdated = true;
 
-        await table.update({
+        await mainTable.update({
           id: targetRecord.id,
           fields: {
             [lastSeenCol]: nowInSeconds
           }
         });
 
-        log(`✓ Updated 'Last Seen' for ${userEmail} on Row #${targetRecord.id}!`, 'success');
+        log(`✓ Updated 'Last Seen' for ${activeEmail} on Row #${targetRecord.id}!`, 'success');
+
       } catch (err) {
         hasUpdated = false;
-        log(`Update failed: ${err.message || err}`, 'error');
+        log(`Ping workflow failed: ${err.message || err}`, 'error');
         console.error("Full error:", err);
       }
     });
