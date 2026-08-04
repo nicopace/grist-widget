@@ -8,26 +8,54 @@
   </style>
 </head>
 <body>
-  <div id="status">Logging view...</div>
+  <div id="status">Initializing...</div>
 
   <script>
-    // 1. Specify the page name for this instance
-    const PAGE_NAME = "Sales Dashboard"; 
+    let hasUpdated = false;
 
-    // 2. Request write access to update tables
-    grist.ready({ requiredAccess: 'full' });
+    // 1. Request full access and define the column mapping configuration
+    grist.ready({
+      requiredAccess: 'full',
+      columns: [
+        { name: 'lastSeen', title: 'Last Seen Field', type: 'DateTime', optional: false }
+      ]
+    });
 
-    // 3. Log the view once Grist widget API is ready
-    window.addEventListener('DOMContentLoaded', async () => {
+    // 2. React to record selection and column mappings
+    grist.onRecord(async (record, mappings) => {
+      const statusEl = document.getElementById('status');
+
+      // Verify that the user mapped the 'Last Seen' field in the Grist right panel
+      if (!mappings || !mappings.lastSeen) {
+        statusEl.innerText = "Please select the 'Last Seen Field' in the Widget side panel ->";
+        return;
+      }
+
+      if (!record) {
+        statusEl.innerText = "No user record selected.";
+        return;
+      }
+
+      // Prevent infinite loops (updating table triggers onRecord again)
+      if (hasUpdated) return;
+      hasUpdated = true;
+
       try {
-        const pageViews = grist.getTable('PageViews');
-        await pageViews.create({
-          fields: { Page: PAGE_NAME }
+        const table = grist.getTable();
+        const colId = mappings.lastSeen;
+        const nowInSeconds = Date.now() / 1000; // Grist DateTime uses UTC timestamps in seconds
+
+        await table.update({
+          id: record.id,
+          fields: {
+            [colId]: nowInSeconds
+          }
         });
-        document.getElementById('status').innerText = `Last seen logged for: ${PAGE_NAME}`;
+
+        statusEl.innerText = `Updated 'Last Seen' timestamp.`;
       } catch (err) {
-        document.getElementById('status').innerText = "Unable to record view.";
-        console.error("View logging failed:", err);
+        statusEl.innerText = "Error updating timestamp.";
+        console.error("Failed to update last seen:", err);
       }
     });
   </script>
