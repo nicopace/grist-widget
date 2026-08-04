@@ -34,13 +34,14 @@
 
     let hasUpdated = false;
 
-    log("Initializing widget...");
+    log("Initializing 'Last Seen' widget...");
 
     try {
-      // 1. Request Full Access and request column mapping configuration
+      // 1. Register required access and map TWO columns in Grist panel
       grist.ready({
         requiredAccess: 'full',
         columns: [
+          { name: 'userEmail', title: 'User Email Field', type: 'Text', optional: false },
           { name: 'lastSeen', title: 'Last Seen Field', type: 'DateTime', optional: false }
         ]
       });
@@ -49,44 +50,94 @@
       log(`Error during grist.ready(): ${e.message}`, 'error');
     }
 
-    // 2. Listen to record events
-    grist.onRecord(async (record, mappings) => {
-      log(`onRecord fired. Record ID: ${record ? record.id : 'null'}`);
+    // Helper: Obtain the logged-in user's email via Grist Access Token
+    async function getCurrentUserEmail() {
+      try {
+        const tokenInfo = await grist.docApi.getAccessToken();
+        
+        // 1. Try profile API query
+        try {
+          const res = await fetch(`${tokenInfo.baseUrl}/profile/user?auth=${tokenInfo.token}`);
+          if (res.ok) {
+            const profile = await res.json();
+            if (profile && profile.email) return profile.email;
+          }
+        } catch (e) {
+          // Fallback to JWT payload
+        }
 
-      // Check column mapping configuration
-      if (!mappings || !mappings.lastSeen) {
-        log("Action required: Map 'Last Seen Field' in Widget side panel ->", "warn");
-        return;
+        // 2. Decode JWT payload fallback
+        if (tokenInfo && tokenInfo.token) {
+          const parts = tokenInfo.token.split('.');
+          if (parts.length === 3) {
+            const payload = JSON.parse(atob(parts[1]));
+            if (payload.email) return payload.email;
+            if (payload.user && payload.user.email) return payload.user.email;
+          }
+        }
+      } catch (err) {
+        log(`Failed to retrieve user token: ${err.message || err}`, 'error');
       }
+      return null;
+    }
 
-      if (!record || !record.id) {
-        log("No active row selected.", "warn");
+    // 2. Listen to ALL records in the table via onRecords
+    grist.onRecords(async (records, mappings) => {
+      log(`onRecords received ${records ? records.length : 0} rows.`);
+
+      // Check for column mappings
+      if (!mappings || !mappings.userEmail || !mappings.lastSeen) {
+        log("Action required: Map both 'User Email Field' and 'Last Seen Field' in the Widget side panel ->", "warn");
         return;
       }
 
       if (hasUpdated) {
-        log("Update already completed for this session.", "info");
+        log("Timestamp already updated for this page session.", "info");
         return;
       }
 
-      const colId = mappings.lastSeen;
-      const nowInSeconds = Math.floor(Date.now() / 1000);
+      log("Detecting active user email...");
+      const userEmail = await getCurrentUserEmail();
 
-      log(`Attempting update on row #${record.id}, column '${colId}'...`);
+      if (!userEmail) {
+        log("Could not detect active user email. Ensure 'Full Document Access' is granted.", "error");
+        return;
+      }
+
+      log(`Active user: ${userEmail}`);
+
+      const emailCol = mappings.userEmail;
+      const lastSeenCol = mappings.lastSeen;
+
+      // Find the row matching the current user's email
+      const targetRecord = records.find(r => 
+        r[emailCol] && String(r[emailCol]).trim().toLowerCase() === userEmail.trim().toLowerCase()
+      );
+
+      if (!targetRecord) {
+        log(`No row found where '${emailCol}' matches '${userEmail}'.`, "warn");
+        return;
+      }
+
+      log(`Found user record (Row #${targetRecord.id}). Updating timestamp...`);
 
       try {
         const table = grist.selectedTable || grist.getTable();
-        
+        const nowInSeconds = Math.floor(Date.now() / 1000);
+
+        // Lock to avoid update loops on re-render
+        hasUpdated = true;
+
         await table.update({
-          id: record.id,
+          id: targetRecord.id,
           fields: {
-            [colId]: nowInSeconds
+            [lastSeenCol]: nowInSeconds
           }
         });
 
-        hasUpdated = true;
-        log(`✓ Successfully updated 'Last Seen' timestamp!`, 'success');
+        log(`✓ Updated 'Last Seen' for ${userEmail} on Row #${targetRecord.id}!`, 'success');
       } catch (err) {
+        hasUpdated = false; // Reset lock on failure
         log(`Update failed: ${err.message || err}`, 'error');
         console.error("Full error:", err);
       }
