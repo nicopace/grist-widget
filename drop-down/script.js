@@ -40,6 +40,7 @@ function initGrist() {
   let currentMappings = null;
   let isUnloading = false;
   let latestRecordId = null;
+  let restoreTimer = null;
 
   window.addEventListener('beforeunload', () => { 
     console.log("[Dropdown Debug] Evento beforeunload detectado. Bloqueando eventos futuros.");
@@ -83,8 +84,8 @@ function initGrist() {
   }
 
   function restoreFromSession() {
-    if (isUnloading || allRecords.length === 0) {
-      console.log("[Dropdown Debug] restoreFromSession() omitido (isUnloading o allRecords vacío).");
+    if (isUnloading || allRecords.length === 0 || latestRecordId !== null) {
+      console.log(`[Dropdown Debug] restoreFromSession() omitido (isUnloading: ${isUnloading}, allRecords: ${allRecords.length}, latestRecordId: ${latestRecordId}).`);
       return;
     }
 
@@ -100,13 +101,21 @@ function initGrist() {
         
         const selectedRecord = allRecords[parseInt(selection)];
         if (selectedRecord) {
-          console.log(`[Dropdown Debug] Programando setCursorPos diferido para rowId: ${selectedRecord.id}`);
-          setTimeout(() => {
-            if (!isUnloading) {
+          if (restoreTimer) {
+            console.log("[Dropdown Debug] Cancelando restoreTimer existente previo a programar uno nuevo.");
+            clearTimeout(restoreTimer);
+          }
+
+          console.log(`[Dropdown Debug] Programando restoreTimer (100ms) para rowId: ${selectedRecord.id}`);
+          restoreTimer = setTimeout(() => {
+            restoreTimer = null;
+            if (!isUnloading && latestRecordId === null) {
               console.log(`[Dropdown Debug] Ejecutando grist.setCursorPos({ rowId: ${selectedRecord.id} }) desde sesión.`);
               grist.setCursorPos({ rowId: selectedRecord.id });
+            } else {
+              console.log(`[Dropdown Debug] Restablecimiento de cursor cancelado porque latestRecordId cambió a: ${latestRecordId}`);
             }
-          }, 0);
+          }, 100);
         }
       } else {
         console.warn(`[Dropdown Debug] El índice de sesión ${selection} no existe entre las opciones del select actual.`);
@@ -190,6 +199,12 @@ function initGrist() {
     latestRecordId = record.id;
     console.log(`[Dropdown Debug] latestRecordId actualizado a: ${latestRecordId}`);
 
+    if (restoreTimer) {
+      console.log("[Dropdown Debug] ¡CANCELANDO restoreTimer pendiente porque onRecord entregó un enlace/registro activo de Grist!");
+      clearTimeout(restoreTimer);
+      restoreTimer = null;
+    }
+
     if (allRecords.length > 0) {
       console.log("[Dropdown Debug] allRecords ya está cargado. Intentando syncToGristRecord() inmediato.");
       syncToGristRecord();
@@ -207,6 +222,13 @@ function initGrist() {
     
     if (selectedRecord) {
       latestRecordId = selectedRecord.id;
+      
+      if (restoreTimer) {
+        console.log("[Dropdown Debug] Cancelando restoreTimer pendiente por cambio manual en la UI.");
+        clearTimeout(restoreTimer);
+        restoreTimer = null;
+      }
+
       console.log(`[Dropdown Debug] Enviando grist.setCursorPos({ rowId: ${selectedRecord.id} })`);
       grist.setCursorPos({ rowId: selectedRecord.id });
       
