@@ -4,47 +4,79 @@
   <meta charset="UTF-8" />
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <style>
-    body { font-family: sans-serif; font-size: 12px; color: #666; margin: 5px; }
+    body {
+      font-family: monospace;
+      font-size: 11px;
+      margin: 8px;
+      background: #f8f9fa;
+      color: #212529;
+    }
+    .log-entry { margin-bottom: 4px; padding: 4px 6px; border-radius: 3px; word-break: break-all; }
+    .info { background: #e3f2fd; color: #0d47a1; }
+    .success { background: #e8f5e9; color: #1b5e20; }
+    .warn { background: #fff3e0; color: #e65100; }
+    .error { background: #ffebee; color: #b71c1c; }
   </style>
 </head>
 <body>
-  <div id="status">Initializing...</div>
+  <div id="logs"></div>
 
   <script>
+    const logContainer = document.getElementById('logs');
+
+    function log(message, type = 'info') {
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${type}`;
+      entry.innerText = `[${new Date().toLocaleTimeString()}] ${message}`;
+      logContainer.appendChild(entry);
+      console.log(`[${type.toUpperCase()}]`, message);
+    }
+
     let hasUpdated = false;
 
-    // 1. Request full access and define the column mapping configuration
-    grist.ready({
-      requiredAccess: 'full',
-      columns: [
-        { name: 'lastSeen', title: 'Last Seen Field', type: 'DateTime', optional: false }
-      ]
-    });
+    log("Initializing widget...");
 
-    // 2. React to record selection and column mappings
+    try {
+      // 1. Request Full Access and request column mapping configuration
+      grist.ready({
+        requiredAccess: 'full',
+        columns: [
+          { name: 'lastSeen', title: 'Last Seen Field', type: 'DateTime', optional: false }
+        ]
+      });
+      log("grist.ready() sent successfully.");
+    } catch (e) {
+      log(`Error during grist.ready(): ${e.message}`, 'error');
+    }
+
+    // 2. Listen to record events
     grist.onRecord(async (record, mappings) => {
-      const statusEl = document.getElementById('status');
+      log(`onRecord fired. Record ID: ${record ? record.id : 'null'}`);
 
-      // Verify that the user mapped the 'Last Seen' field in the Grist right panel
+      // Check column mapping configuration
       if (!mappings || !mappings.lastSeen) {
-        statusEl.innerText = "Please select the 'Last Seen Field' in the Widget side panel ->";
+        log("Action required: Map 'Last Seen Field' in Widget side panel ->", "warn");
         return;
       }
 
-      if (!record) {
-        statusEl.innerText = "No user record selected.";
+      if (!record || !record.id) {
+        log("No active row selected.", "warn");
         return;
       }
 
-      // Prevent infinite loops (updating table triggers onRecord again)
-      if (hasUpdated) return;
-      hasUpdated = true;
+      if (hasUpdated) {
+        log("Update already completed for this session.", "info");
+        return;
+      }
+
+      const colId = mappings.lastSeen;
+      const nowInSeconds = Math.floor(Date.now() / 1000);
+
+      log(`Attempting update on row #${record.id}, column '${colId}'...`);
 
       try {
-        const table = grist.getTable();
-        const colId = mappings.lastSeen;
-        const nowInSeconds = Date.now() / 1000; // Grist DateTime uses UTC timestamps in seconds
-
+        const table = grist.selectedTable || grist.getTable();
+        
         await table.update({
           id: record.id,
           fields: {
@@ -52,10 +84,11 @@
           }
         });
 
-        statusEl.innerText = `Updated 'Last Seen' timestamp.`;
+        hasUpdated = true;
+        log(`✓ Successfully updated 'Last Seen' timestamp!`, 'success');
       } catch (err) {
-        statusEl.innerText = "Error updating timestamp.";
-        console.error("Failed to update last seen:", err);
+        log(`Update failed: ${err.message || err}`, 'error');
+        console.error("Full error:", err);
       }
     });
   </script>
