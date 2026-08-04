@@ -22,7 +22,7 @@
   <div id="logs"></div>
 
   <script>
-    // Name of the helper ping table created in Step 1
+    // Name of the helper ping table
     const PING_TABLE_NAME = "UserPing"; 
 
     const logContainer = document.getElementById('logs');
@@ -69,23 +69,29 @@
         const createdId = Array.isArray(createdRes) ? createdRes[0].id : (createdRes.id || createdRes);
         log(`Created temporary ping record #${createdId}.`);
 
-        // 2. Fetch records from UserPing to read server-calculated $user.Email
-        const pingRecords = await pingTable.getRecords();
-        const myPing = pingRecords.find(r => r.id === createdId);
-        const activeEmail = myPing ? myPing.User_Email : null;
+        // 2. Fetch full table data via grist.docApi.fetchTable
+        const pingData = await grist.docApi.fetchTable(PING_TABLE_NAME);
+        
+        let activeEmail = null;
+        if (pingData && pingData.id) {
+          const index = pingData.id.indexOf(createdId);
+          if (index !== -1 && pingData.User_Email) {
+            activeEmail = pingData.User_Email[index];
+          }
+        }
 
         // 3. Delete temporary ping record
         await pingTable.destroy([createdId]);
         log(`Cleaned up ping record #${createdId}.`);
 
         if (!activeEmail) {
-          log(`Could not resolve user email. Check that table '${PING_TABLE_NAME}' has column 'User_Email' with formula $user.Email.`, "error");
+          log(`Could not resolve user email. Ensure table '${PING_TABLE_NAME}' contains column 'User_Email' with formula $user.Email.`, "error");
           return;
         }
 
         log(`Active user resolved: ${activeEmail}`);
 
-        // 4. Locate user row in target table and update timestamp
+        // 4. Locate matching user row and update timestamp
         const emailCol = mappings.userEmail;
         const lastSeenCol = mappings.lastSeen;
 
@@ -94,7 +100,7 @@
         );
 
         if (!targetRecord) {
-          log(`No row found in main table where '${emailCol}' matches '${activeEmail}'.`, "warn");
+          log(`No row found in target table where '${emailCol}' matches '${activeEmail}'.`, "warn");
           return;
         }
 
