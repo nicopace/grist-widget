@@ -35,7 +35,7 @@ function initGrist() {
   let sessionID = "";
   let currentMappings = null;
   let isUnloading = false;
-  let hasRecordFromGrist = false; // Tracks if a link/external Grist selection occurred
+  let hasGristRecord = false; // Flag to check if Grist supplied a record (e.g. via link)
 
   window.addEventListener('beforeunload', () => { isUnloading = true; });
   window.addEventListener('pagehide', () => { isUnloading = true; });
@@ -49,10 +49,8 @@ function initGrist() {
   }
 
   function restoreSelection() {
-    if (isUnloading || allRecords.length === 0) return;
-
-    // If Grist already supplied a record via link/onRecord, do not overwrite it with old session state
-    if (hasRecordFromGrist) return;
+    // If unloading, empty, or Grist already set a record from a link, do not restore
+    if (isUnloading || hasGristRecord || allRecords.length === 0) return;
 
     const storageKey = getStorageKey();
     const selection = sessionStorage.getItem(storageKey);
@@ -60,11 +58,7 @@ function initGrist() {
     if (selection !== null && selection !== undefined) {
       const dropdown = document.getElementById('dropdown');
       if (dropdown.options[selection]) {
-        dropdown.value = selection;
-        const selectedRecord = allRecords[parseInt(selection)];
-        if (selectedRecord) {
-          grist.setCursorPos({ rowId: selectedRecord.id });
-        }
+        dropdown.value = selection; // Update UI only; DO NOT call setCursorPos here
       }
     }
   }
@@ -88,7 +82,7 @@ function initGrist() {
     document.getElementById("container").style.display = '';
     document.getElementById("config").style.display = 'none';
 
-    restoreSelection();
+    setTimeout(restoreSelection, 50);
   });
 
   grist.onRecords(function (records, mappings) {
@@ -111,7 +105,9 @@ function initGrist() {
       showError("No valid options found");
     }
     updateDropdown(options);
-    restoreSelection();
+    
+    // Defer session restore to give onRecord time to handle link selections first
+    setTimeout(restoreSelection, 50);
   });
 
   grist.onRecord(function (record) {
@@ -119,17 +115,18 @@ function initGrist() {
 
     const index = allRecords.findIndex(r => r.id === record.id);
     if (index !== -1) {
-      hasRecordFromGrist = true; // Mark that link/Grist selection took precedence
+      hasGristRecord = true; // Mark that link/Grist active cursor was received
       
       const dropdown = document.getElementById('dropdown');
       dropdown.value = String(index);
 
-      // Link selection overwrites and updates the session storage
+      // Link selection takes precedence AND updates session storage for subsequent pages
       const storageKey = getStorageKey();
       sessionStorage.setItem(storageKey, index);
     }
   });
 
+  // Only trigger Grist cursor movement when the user manually changes the select dropdown
   document.getElementById('dropdown').addEventListener('change', function(event) {    
     if (isUnloading) return;
     
