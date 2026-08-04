@@ -37,7 +37,6 @@
     log("Initializing 'Last Seen' widget...");
 
     try {
-      // 1. Register required access and map TWO columns in Grist panel
       grist.ready({
         requiredAccess: 'full',
         columns: [
@@ -53,26 +52,32 @@
     // Helper: Obtain the logged-in user's email via Grist Access Token
     async function getCurrentUserEmail() {
       try {
-        const tokenInfo = await grist.docApi.getAccessToken();
+        // Explicitly passing { readOnly: true } prevents grist-plugin-api from throwing
+        const tokenInfo = await grist.docApi.getAccessToken({ readOnly: true });
         
-        // 1. Try profile API query
-        try {
-          const res = await fetch(`${tokenInfo.baseUrl}/profile/user?auth=${tokenInfo.token}`);
-          if (res.ok) {
-            const profile = await res.json();
-            if (profile && profile.email) return profile.email;
-          }
-        } catch (e) {
-          // Fallback to JWT payload
-        }
-
-        // 2. Decode JWT payload fallback
         if (tokenInfo && tokenInfo.token) {
           const parts = tokenInfo.token.split('.');
           if (parts.length === 3) {
-            const payload = JSON.parse(atob(parts[1]));
-            if (payload.email) return payload.email;
+            // Handle URL-safe base64 decoding for JWT
+            let base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+            while (base64.length % 4) base64 += '=';
+            const payload = JSON.parse(atob(base64));
+            
             if (payload.user && payload.user.email) return payload.user.email;
+            if (payload.email) return payload.email;
+          }
+        }
+
+        // Secondary attempt via API profile endpoint
+        if (tokenInfo && tokenInfo.baseUrl && tokenInfo.token) {
+          try {
+            const res = await fetch(`${tokenInfo.baseUrl}/profile/user?auth=${tokenInfo.token}`);
+            if (res.ok) {
+              const profile = await res.json();
+              if (profile && profile.email) return profile.email;
+            }
+          } catch (e) {
+            // Fallback fail
           }
         }
       } catch (err) {
@@ -81,18 +86,16 @@
       return null;
     }
 
-    // 2. Listen to ALL records in the table via onRecords
     grist.onRecords(async (records, mappings) => {
       log(`onRecords received ${records ? records.length : 0} rows.`);
 
-      // Check for column mappings
       if (!mappings || !mappings.userEmail || !mappings.lastSeen) {
         log("Action required: Map both 'User Email Field' and 'Last Seen Field' in the Widget side panel ->", "warn");
         return;
       }
 
       if (hasUpdated) {
-        log("Timestamp already updated for this page session.", "info");
+        log("Timestamp already updated for this session.", "info");
         return;
       }
 
@@ -100,7 +103,7 @@
       const userEmail = await getCurrentUserEmail();
 
       if (!userEmail) {
-        log("Could not detect active user email. Ensure 'Full Document Access' is granted.", "error");
+        log("Could not detect active user email. Ensure user is logged in.", "error");
         return;
       }
 
@@ -109,7 +112,7 @@
       const emailCol = mappings.userEmail;
       const lastSeenCol = mappings.lastSeen;
 
-      // Find the row matching the current user's email
+      // Match target user record (case-insensitive)
       const targetRecord = records.find(r => 
         r[emailCol] && String(r[emailCol]).trim().toLowerCase() === userEmail.trim().toLowerCase()
       );
@@ -125,7 +128,6 @@
         const table = grist.selectedTable || grist.getTable();
         const nowInSeconds = Math.floor(Date.now() / 1000);
 
-        // Lock to avoid update loops on re-render
         hasUpdated = true;
 
         await table.update({
@@ -137,7 +139,7 @@
 
         log(`✓ Updated 'Last Seen' for ${userEmail} on Row #${targetRecord.id}!`, 'success');
       } catch (err) {
-        hasUpdated = false; // Reset lock on failure
+        hasUpdated = false;
         log(`Update failed: ${err.message || err}`, 'error');
         console.error("Full error:", err);
       }
