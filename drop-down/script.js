@@ -32,14 +32,25 @@ function saveOption() {
 
 function initGrist() {
   let allRecords = [];
+  let displayRecords = [];
   let sessionID = "";
   let currentMappings = null;
   let isUnloading = false;
   let latestRecordId = null;
-  let restoreTimer = null;
+  let initialSelectionApplied = false;
+  let pendingRestoreId = null;
+  let pendingTimer = null;
 
   window.addEventListener('beforeunload', () => { isUnloading = true; });
   window.addEventListener('pagehide', () => { isUnloading = true; });
+
+  function clearPendingRestore() {
+    pendingRestoreId = null;
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      pendingTimer = null;
+    }
+  }
 
   function getStorageKey() {
     if (sessionID && sessionID.length > 0) {
@@ -49,52 +60,85 @@ function initGrist() {
     return `auto_${window.location.pathname}_${mappingHash}_Dropdown_Item`;
   }
 
-  function syncToGristRecord() {
-    if (latestRecordId === null || allRecords.length === 0) return false;
-
-    const index = allRecords.findIndex(r => r.id === latestRecordId);
-    if (index !== -1) {
-      const dropdown = document.getElementById('dropdown');
-      dropdown.value = String(index);
-
+  function getStoredIndex() {
+    try {
       const storageKey = getStorageKey();
-      sessionStorage.setItem(storageKey, index);
+      const selection = sessionStorage.getItem(storageKey);
+      if (selection === null || selection === undefined || selection === "") return -1;
+      const index = parseInt(selection, 10);
+      if (Number.isNaN(index) || index < 0 || index >= displayRecords.length) return -1;
+      return index;
+    } catch (e) {
+      return -1;
+    }
+  }
+
+  function setDropdownIndex(index) {
+    const dropdown = document.getElementById('dropdown');
+    if (dropdown.options[index]) {
+      dropdown.value = String(index);
+    }
+  }
+
+  function syncToGristRecord() {
+    if (latestRecordId === null || displayRecords.length === 0) return false;
+
+    const index = displayRecords.findIndex(r => r.id === latestRecordId);
+    if (index !== -1) {
+      setDropdownIndex(index);
+
+      try {
+        const storageKey = getStorageKey();
+        sessionStorage.setItem(storageKey, String(index));
+      } catch (e) {}
       return true;
     }
     return false;
   }
 
   function restoreFromSession() {
-    if (isUnloading || allRecords.length === 0 || latestRecordId !== null) return;
+    if (isUnloading || displayRecords.length === 0) return false;
 
-    const storageKey = getStorageKey();
-    const selection = sessionStorage.getItem(storageKey);
+    const storedIndex = getStoredIndex();
+    if (storedIndex === -1) return false;
 
-    if (selection !== null && selection !== undefined) {
-      const dropdown = document.getElementById('dropdown');
-      if (dropdown.options[selection]) {
-        dropdown.value = selection;
-        
-        const selectedRecord = allRecords[parseInt(selection)];
-        if (selectedRecord) {
-          if (restoreTimer) clearTimeout(restoreTimer);
+    const selectedRecord = displayRecords[storedIndex];
+    if (!selectedRecord) return false;
 
-          restoreTimer = setTimeout(() => {
-            restoreTimer = null;
-            if (!isUnloading && latestRecordId === null) {
-              grist.setCursorPos({ rowId: selectedRecord.id });
-            }
-          }, 100);
-        }
-      }
-    }
+    setDropdownIndex(storedIndex);
+    latestRecordId = selectedRecord.id;
+    pendingRestoreId = selectedRecord.id;
+    initialSelectionApplied = true;
+
+    // Safety: don't ignore cursor updates forever if Grist never echoes back.
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(() => {
+      pendingTimer = null;
+      pendingRestoreId = null;
+    }, 2000);
+
+    try {
+      grist.setCursorPos({ rowId: selectedRecord.id });
+    } catch (e) {}
+    return true;
   }
 
   function applySelectionLogic() {
-    const synced = syncToGristRecord();
-    if (!synced) {
-      restoreFromSession();
+    if (isUnloading || displayRecords.length === 0) return;
+
+    // On first load, the stored value wins over the initial Grist cursor.
+    // Only fall back to the Grist cursor when there is nothing stored.
+    if (!initialSelectionApplied) {
+      if (restoreFromSession()) {
+        return;
+      }
+      if (syncToGristRecord()) {
+        initialSelectionApplied = true;
+      }
+      return;
     }
+
+    syncToGristRecord();
   }
 
   grist.ready({
@@ -125,6 +169,8 @@ function initGrist() {
     if (!records || records.length === 0) {
       showError("No records received");
       updateDropdown([]);
+      allRecords = [];
+      displayRecords = [];
       return;
     }
     
@@ -133,7 +179,16 @@ function initGrist() {
     
     const mapped = grist.mapColumnNames(records);
     showError("");
-    const options = mapped.map(record => record.OptionsToSelect).filter(option => option !== null && option !== undefined);
+    // Keep records aligned with dropdown indices (skip null/undefined options).
+    displayRecords = [];
+    const options = [];
+    mapped.forEach((mappedRecord, i) => {
+      const option = mappedRecord.OptionsToSelect;
+      if (option !== null && option !== undefined) {
+        options.push(option);
+        displayRecords.push(records[i]);
+      }
+    });
     
     if (options.length === 0) {
       showError("No valid options found");
@@ -146,14 +201,30 @@ function initGrist() {
   grist.onRecord(function (record) {
     if (isUnloading || !record || !record.id) return;
 
-    latestRecordId = record.id;
-
-    if (restoreTimer) {
-      clearTimeout(restoreTimer);
-      restoreTimer = null;
+    // Ignore the stale initial cursor that arrives before/after our restore
+    // echoes back. Once Grist confirms our restored cursor, resume following it.
+    if (pendingRestoreId !== null) {
+      if (record.id === pendingRestoreId) {
+        latestRecordId = record.id;
+        clearPendingRestore();
+        syncToGristRecord();
+      }
+      return;
     }
 
-    if (allRecords.length > 0) {
+    // Before the initial selection is applied, stash the cursor but don't let
+    // it clobber a stored value. onRecords will prefer the stored value.
+    if (!initialSelectionApplied) {
+      latestRecordId = record.id;
+      if (displayRecords.length > 0) {
+        applySelectionLogic();
+      }
+      return;
+    }
+
+    latestRecordId = record.id;
+
+    if (displayRecords.length > 0) {
       syncToGristRecord();
     }
   });
@@ -161,20 +232,19 @@ function initGrist() {
   document.getElementById('dropdown').addEventListener('change', function(event) {    
     if (isUnloading) return;
     
-    const selectedIndex = parseInt(event.target.value);
-    const selectedRecord = allRecords[selectedIndex];
+    const selectedIndex = parseInt(event.target.value, 10);
+    const selectedRecord = displayRecords[selectedIndex];
     
     if (selectedRecord) {
       latestRecordId = selectedRecord.id;
-      
-      if (restoreTimer) {
-        clearTimeout(restoreTimer);
-        restoreTimer = null;
-      }
+      clearPendingRestore();
+      initialSelectionApplied = true;
 
       grist.setCursorPos({ rowId: selectedRecord.id });
-      const storageKey = getStorageKey();
-      sessionStorage.setItem(storageKey, selectedIndex);
+      try {
+        const storageKey = getStorageKey();
+        sessionStorage.setItem(storageKey, String(selectedIndex));
+      } catch (e) {}
     }
   });
 }
