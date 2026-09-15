@@ -49,13 +49,15 @@
     // (guard-first). Kept in-memory only (no sessionStorage): a persisted flag
     // would permanently disable the widget in cloned tabs / Electron windows,
     // and the server-side staleness check already prevents update loops.
-    // How often a viewer may stamp Last_seen. NOTE: on docs with access
-    // rules, the server cannot always stream a data change incrementally and
-    // answers the update with `docShutdown`, forcing EVERY viewer to fully
-    // reload the document (see console: "Received docShutdown" → reloadPane).
-    // So each update is expensive: keep this coarse (daily). Lower it only
-    // if your doc has no access rules on the target table.
-    const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // skip update if lastSeen is fresher than this
+    // How often a viewer may stamp Last_seen. NOTE: this does NOT guard
+    // against full-page reloads. If this doc sources access-rule user
+    // attributes from the very table/row written here (e.g. Team_member by
+    // Email), Grist treats EVERY such write as a permission change and
+    // answers with `docShutdown`, forcing all viewers to reload
+    // (GranularAccess._checkUserAttributes → NEED_RELOAD). No write path,
+    // value encoding, or threshold avoids that while the config stands —
+    // fix it in Access Rules (see README), not here.
+    const STALE_THRESHOLD_MS = 5 * 60 * 1000; // skip update if lastSeen is fresher than this
     const RETRY_BASE_MS = 60 * 1000;
     const RETRY_MAX_MS = 10 * 60 * 1000;
     let hasSettled = false;
