@@ -57,6 +57,25 @@ Ensure your primary User table contains:
 
 ---
 
+## Page refresh / churn notes
+
+Grist has no "silent write": any change to a table shown on the current page
+re-renders that view (this is normal doc sync, not a bug). To keep the widget
+quiet:
+
+* Do **not** put the `UserPing` helper table on any page. Its create/delete
+  churn should never be visible.
+* The widget resolves your email with one ping `create` + `delete` on first
+  load, then caches it per tab (1h, scoped to the doc), so reloads cost zero
+  ping writes.
+* The `Last_Seen` cell itself is only rewritten when older than 5 minutes, so
+  repeat visits usually cost zero writes. A single row refresh in the Users
+  table right after an update is expected.
+
+If even that one row refresh is unwanted, point the widget at a page where
+the Users table is not displayed, or switch the design to append rows to a
+separate hidden log table instead of updating `Last_Seen` in place.
+
 ## Troubleshooting
 
 | Issue | Cause | Solution |
