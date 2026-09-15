@@ -49,7 +49,13 @@
     // (guard-first). Kept in-memory only (no sessionStorage): a persisted flag
     // would permanently disable the widget in cloned tabs / Electron windows,
     // and the server-side staleness check already prevents update loops.
-    const STALE_THRESHOLD_MS = 5 * 60 * 1000; // skip update if lastSeen is fresher than this
+    // How often a viewer may stamp Last_seen. NOTE: on docs with access
+    // rules, the server cannot always stream a data change incrementally and
+    // answers the update with `docShutdown`, forcing EVERY viewer to fully
+    // reload the document (see console: "Received docShutdown" → reloadPane).
+    // So each update is expensive: keep this coarse (daily). Lower it only
+    // if your doc has no access rules on the target table.
+    const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // skip update if lastSeen is fresher than this
     const RETRY_BASE_MS = 60 * 1000;
     const RETRY_MAX_MS = 10 * 60 * 1000;
     let hasSettled = false;
