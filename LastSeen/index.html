@@ -34,7 +34,34 @@
       console.log(`[${type.toUpperCase()}]`, message);
     }
 
-    let hasUpdated = false;
+    // Loop guards: onRecords re-fires on every table write this widget makes,
+    // so all writes below must be gated. hasSettled is set BEFORE any write
+    // (guard-first). Kept in-memory only (no sessionStorage): a persisted flag
+    // would permanently disable the widget in cloned tabs / Electron windows,
+    // and the server-side staleness check already prevents update loops.
+    const STALE_THRESHOLD_MS = 5 * 60 * 1000; // skip update if lastSeen is fresher than this
+    const RETRY_BASE_MS = 60 * 1000;
+    const RETRY_MAX_MS = 10 * 60 * 1000;
+    let hasSettled = false;
+    let isRunning = false;
+    let mappingWarned = false;
+    let configWarned = false;
+    let failureCount = 0;
+    let nextRetryTime = 0;
+
+    function settle() {
+      hasSettled = true;
+    }
+
+    function lastSeenAgeMs(value) {
+      if (value === null || value === undefined || value === '') return Infinity;
+      if (typeof value === 'number') {
+        const ms = value < 1e12 ? value * 1000 : value; // Grist DateTime arrives in seconds
+        return Date.now() - ms;
+      }
+      const parsed = Date.parse(value);
+      return isNaN(parsed) ? Infinity : Date.now() - parsed;
+    }
 
     log("Initializing 'Last Seen' widget...");
 
@@ -53,25 +80,41 @@
 
     grist.onRecords(async (records, mappings) => {
       if (!mappings || !mappings.userEmail || !mappings.lastSeen) {
-        log("Action required: Map both 'User Email Field' and 'Last Seen Field' in Widget side panel ->", "warn");
+        if (!mappingWarned) {
+          mappingWarned = true;
+          log("Action required: Map both 'User Email Field' and 'Last Seen Field' in Widget side panel ->", "warn");
+        }
         return;
       }
 
-      if (hasUpdated) return;
+      if (hasSettled) return;
+      if (isRunning) return; // re-entrant event while a run is in flight: drop it
+      if (Date.now() < nextRetryTime) return; // backing off after a failure: no writes
+      isRunning = true;
+
+      // Worst-case fork bomb: widget bound to the ping table itself, so our
+      // own create/destroy would re-trigger this handler. Stop terminally.
+      if (records && records.length > 0 && Object.prototype.hasOwnProperty.call(records[0], 'User_Email')) {
+        isRunning = false;
+        settle();
+        log(`Widget appears to be bound to the '${PING_TABLE_NAME}' table itself. Bind it to your User table instead.`, 'error');
+        return;
+      }
 
       log("Resolving active user via trigger formula ping...");
 
+      let createdId = null;
       try {
         const pingTable = grist.getTable(PING_TABLE_NAME);
-        
+
         // 1. Create temporary record in UserPing table
         const createdRes = await pingTable.create({ fields: {} });
-        const createdId = Array.isArray(createdRes) ? createdRes[0].id : (createdRes.id || createdRes);
+        createdId = Array.isArray(createdRes) ? createdRes[0].id : (createdRes.id || createdRes);
         log(`Created temporary ping record #${createdId}.`);
 
         // 2. Fetch full table data via grist.docApi.fetchTable
         const pingData = await grist.docApi.fetchTable(PING_TABLE_NAME);
-        
+
         let activeEmail = null;
         if (pingData && pingData.id) {
           const index = pingData.id.indexOf(createdId);
@@ -80,27 +123,33 @@
           }
         }
 
-        // 3. Delete temporary ping record
+        // 3. Delete temporary ping record (also on later failure paths via finally)
         await pingTable.destroy([createdId]);
-        log(`Cleaned up ping record #${createdId}.`);
+        createdId = null;
+        log('Cleaned up ping record.');
 
         if (!activeEmail) {
-          log(`Could not resolve user email. Ensure table '${PING_TABLE_NAME}' contains column 'User_Email' with formula $user.Email.`, "error");
-          return;
+          throw new Error(`Could not resolve user email. Ensure table '${PING_TABLE_NAME}' contains column 'User_Email' with trigger formula 'user.Email'.`);
         }
 
         log(`Active user resolved: ${activeEmail}`);
 
-        // 4. Locate matching user row and update timestamp
+        // 4. Locate matching user row and update timestamp (only if stale)
         const emailCol = mappings.userEmail;
         const lastSeenCol = mappings.lastSeen;
 
-        const targetRecord = records.find(r => 
+        const targetRecord = records.find(r =>
           r[emailCol] && String(r[emailCol]).trim().toLowerCase() === activeEmail.trim().toLowerCase()
         );
 
         if (!targetRecord) {
-          log(`No row found in target table where '${emailCol}' matches '${activeEmail}'.`, "warn");
+          throw new Error(`No row found in target table where '${emailCol}' matches '${activeEmail}'.`);
+        }
+
+        if (lastSeenAgeMs(targetRecord[lastSeenCol]) < STALE_THRESHOLD_MS) {
+          log(`'Last Seen' for ${activeEmail} is already fresh. Skipping update.`, 'success');
+          failureCount = 0;
+          settle();
           return;
         }
 
@@ -109,7 +158,7 @@
         const mainTable = grist.selectedTable || grist.getTable();
         const nowInSeconds = Math.floor(Date.now() / 1000);
 
-        hasUpdated = true;
+        settle(); // guard-first: block re-entrant onRecords before the write below
 
         await mainTable.update({
           id: targetRecord.id,
@@ -119,11 +168,29 @@
         });
 
         log(`✓ Updated 'Last Seen' for ${activeEmail} on Row #${targetRecord.id}!`, 'success');
+        failureCount = 0;
 
       } catch (err) {
-        hasUpdated = false;
-        log(`Ping workflow failed: ${err.message || err}`, 'error');
         console.error("Full error:", err);
+        const msg = err && err.message ? err.message : String(err);
+        // Permanent config errors settle terminally instead of retrying forever.
+        if (/formula|denied|permission|not found|no row found|could not resolve/i.test(msg)) {
+          if (!configWarned) {
+            configWarned = true;
+            log(`Ping workflow stopped: ${msg}`, 'error');
+          }
+          settle();
+        } else {
+          failureCount += 1;
+          nextRetryTime = Date.now() + Math.min(RETRY_BASE_MS * (2 ** (failureCount - 1)), RETRY_MAX_MS);
+          log(`Ping workflow failed (retry in backoff): ${msg}`, 'error');
+        }
+      } finally {
+        if (createdId !== null) {
+          try { await grist.getTable(PING_TABLE_NAME).destroy([createdId]); } catch (e) { /* ignore cleanup failure */ }
+          createdId = null;
+        }
+        isRunning = false;
       }
     });
   </script>

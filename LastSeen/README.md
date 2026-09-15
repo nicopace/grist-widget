@@ -24,7 +24,7 @@ To safely detect who is viewing the page, this widget uses a **server-side ping 
 1. In your Grist document, create a new table named **`UserPing`**.
 2. Add a column named **`User_Email`**.
 3. Open the right panel for **`User_Email`** and configure its settings:
-* **Formula / Trigger:** Set to `$user.Email`
+* **Formula / Trigger:** Set to `user.Email` (no `$` prefix — `$user` fails with `AttributeError` on recent Grist)
 * **Apply on:** Select **New Records**
 
 
@@ -62,5 +62,5 @@ Ensure your primary User table contains:
 | Issue | Cause | Solution |
 | --- | --- | --- |
 | **`Access level 'full' required`** | The widget permission is set to Read-only or None. | In the right sidebar under **Widget -> Access Level**, select **Full Document Access**. |
-| **`Could not resolve user email`** | The helper table name or column name is incorrect. | Ensure the helper table is named exactly `UserPing` and contains a column named `User_Email` with the trigger formula `$user.Email`. |
+| **`Could not resolve user email`** | The helper table name or column name is incorrect, or the formula uses `$user`. | Ensure the helper table is named exactly `UserPing` and contains a column named `User_Email` with the trigger formula `user.Email`. |
 | **`No row found...`** | The logged-in user's email does not exist in the main User table. | Verify that the user's email address in Grist matches an entry in your user table. |
